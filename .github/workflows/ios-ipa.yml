@@ -1,0 +1,77 @@
+name: Build unsigned iOS IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate the native iOS runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter create --platforms=ios --org=com.mangis --project-name=mangis "$RUNNER_TEMP/mangis-ios"
+          cp pubspec.yaml "$RUNNER_TEMP/mangis-ios/pubspec.yaml"
+          cp -R lib assets test "$RUNNER_TEMP/mangis-ios/"
+          echo "FLUTTER_PROJECT=$RUNNER_TEMP/mangis-ios" >> "$GITHUB_ENV"
+
+      - name: Install Dart dependencies
+        working-directory: ${{ env.FLUTTER_PROJECT }}
+        run: flutter pub get
+
+      - name: Generate Mangis app icon
+        working-directory: ${{ env.FLUTTER_PROJECT }}
+        run: dart run flutter_launcher_icons
+
+      - name: Configure iOS display name, bundle ID, and location permission
+        working-directory: ${{ env.FLUTTER_PROJECT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Mangis" ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :NSLocationWhenInUseUsageDescription string Mangis usa tu ubicación solo si elegís buscar tu dirección actual." ios/Runner/Info.plist
+          sed -i '' 's/com\.mangis\.mangis/com.mangis.demo.ios/g' ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Run Flutter tests
+        working-directory: ${{ env.FLUTTER_PROJECT }}
+        run: flutter test
+
+      - name: Build unsigned iOS application
+        working-directory: ${{ env.FLUTTER_PROJECT }}
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA for AltStore
+        working-directory: ${{ env.FLUTTER_PROJECT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          test -d "$APP_PATH"
+          rm -rf ipa-staging
+          mkdir -p ipa-staging/Payload
+          cp -R "$APP_PATH" ipa-staging/Payload/Mangis.app
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent ipa-staging/Payload Mangis.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mangis-unsigned-IPA
+          path: ${{ env.FLUTTER_PROJECT }}/Mangis.ipa
+          if-no-files-found: error
+          retention-days: 14
